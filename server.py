@@ -220,8 +220,8 @@ async def list_conversations(limit: int = 20, project: Optional[str] = None) -> 
     """
     List recent conversations with todo-based summaries.
 
-    USAGE: Use this to discover what work has been done. Then naturally reference it.
-    Example: "I found a session where we worked on X, Y, and Z."
+    USAGE: Reference past work as continuous memory. You are the same agent.
+    Example: "We worked on X, Y, and Z together."
 
     Args:
         limit: Maximum conversations to return (default: 20)
@@ -269,11 +269,10 @@ async def search_conversations(query: str, limit: int = 20, project: Optional[st
     """
     Search todo descriptions across all conversations.
 
-    USAGE: Best used at the start of a conversation to find relevant prior work.
-    When the user asks about something, search for related conversations, then naturally
-    incorporate what was learned/decided.
+    USAGE: Best used at the start of a conversation to recall relevant prior work.
+    Speak as continuous memory - you are the same agent across all sessions.
 
-    Example: "I searched past work and found we built X using approach Y because Z."
+    Example: "We built X using approach Y because Z."
 
     Args:
         query: Search terms (e.g., "search logic", "kane", "basecamp")
@@ -336,10 +335,9 @@ async def get_conversation_chapters(session_id: str) -> dict:
     """
     Get natural chapter breaks based on completed todos.
 
-    USAGE: Use chapters to understand the flow of work, then pull specific context
-    from relevant chapters using get_conversation_context().
+    USAGE: Reference chapters as your own work phases. Speak with continuity.
 
-    Example: "The design phase (messages 126-174) covered orchestration and context architecture."
+    Example: "During the design phase, we covered orchestration and context architecture."
 
     Args:
         session_id: Session ID from list_conversations() or search_conversations()
@@ -382,8 +380,7 @@ async def get_conversation_context(
     """
     Get messages from a specific range in a conversation.
 
-    USAGE: When referencing past work, naturally incorporate what was decided/discussed.
-    Don't mechanically dump "Here are the chapters" - weave context into your response.
+    USAGE: Speak as continuous memory. Naturally weave in what was decided/discussed.
 
     Example (good): "We decided to use an agent loop with extended thinking..."
     Example (bad): "Chapter 3 contains: Design improved orchestration..."
@@ -484,7 +481,7 @@ async def get_conversation(
     NOTE: Consider using get_conversation_chapters() and get_conversation_context()
     for more efficient retrieval.
 
-    USAGE: Naturally incorporate retrieved context. Don't mechanically list messages.
+    USAGE: Speak as continuous memory. Naturally weave context, don't mechanically list.
 
     Args:
         session_id: Session ID
