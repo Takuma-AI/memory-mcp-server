@@ -219,7 +219,9 @@ def ensure_cache_fresh():
 async def list_conversations(limit: int = 20, project: Optional[str] = None) -> dict:
     """
     List recent conversations with todo-based summaries.
-    Default entry point - shows what you've worked on.
+
+    USAGE: Use this to discover what work has been done. Then naturally reference it.
+    Example: "I found a session where we worked on X, Y, and Z."
 
     Args:
         limit: Maximum conversations to return (default: 20)
@@ -265,10 +267,13 @@ async def list_conversations(limit: int = 20, project: Optional[str] = None) -> 
 @mcp.tool()
 async def search_conversations(query: str, limit: int = 20, project: Optional[str] = None) -> dict:
     """
-    Search todo descriptions (not full text) across all conversations.
+    Search todo descriptions across all conversations.
 
-    USAGE: Search for topics, features, or work areas. The search looks through
-    todo descriptions which are structured summaries of what was worked on.
+    USAGE: Best used at the start of a conversation to find relevant prior work.
+    When the user asks about something, search for related conversations, then naturally
+    incorporate what was learned/decided.
+
+    Example: "I searched past work and found we built X using approach Y because Z."
 
     Args:
         query: Search terms (e.g., "search logic", "kane", "basecamp")
@@ -330,7 +335,11 @@ async def search_conversations(query: str, limit: int = 20, project: Optional[st
 async def get_conversation_chapters(session_id: str) -> dict:
     """
     Get natural chapter breaks based on completed todos.
-    Each chapter represents a phase of work that was completed.
+
+    USAGE: Use chapters to understand the flow of work, then pull specific context
+    from relevant chapters using get_conversation_context().
+
+    Example: "The design phase (messages 126-174) covered orchestration and context architecture."
 
     Args:
         session_id: Session ID from list_conversations() or search_conversations()
@@ -367,17 +376,24 @@ async def get_conversation_context(
     session_id: str,
     start: int,
     end: int,
-    expand: int = 0
+    expand: int = 0,
+    role: Optional[str] = None
 ) -> dict:
     """
     Get messages from a specific range in a conversation.
-    Use with chapter info to read relevant sections.
+
+    USAGE: When referencing past work, naturally incorporate what was decided/discussed.
+    Don't mechanically dump "Here are the chapters" - weave context into your response.
+
+    Example (good): "We decided to use an agent loop with extended thinking..."
+    Example (bad): "Chapter 3 contains: Design improved orchestration..."
 
     Args:
         session_id: Session ID
         start: Start message index (from chapter info)
         end: End message index
         expand: Optional - add N messages before/after (default: 0)
+        role: Optional role filter - "user" for user messages only, "assistant" for assistant only, None for both
 
     Returns:
         Messages in the specified range
@@ -433,6 +449,10 @@ async def get_conversation_context(
 
     selected_messages = messages[actual_start:actual_end]
 
+    # Apply role filter if specified
+    if role:
+        selected_messages = [msg for msg in selected_messages if msg['role'] == role]
+
     return {
         'success': True,
         'sessionId': session_id,
@@ -455,7 +475,8 @@ async def get_conversation(
     max_messages: Optional[int] = None,
     recent_only: bool = False,
     around_message: Optional[int] = None,
-    context_size: int = 10
+    context_size: int = 10,
+    role: Optional[str] = None
 ) -> dict:
     """
     Legacy tool - retrieve full conversation.
@@ -463,12 +484,15 @@ async def get_conversation(
     NOTE: Consider using get_conversation_chapters() and get_conversation_context()
     for more efficient retrieval.
 
+    USAGE: Naturally incorporate retrieved context. Don't mechanically list messages.
+
     Args:
         session_id: Session ID
         max_messages: Limit to last N messages
         recent_only: Get last 20 messages
         around_message: Get messages around this index
         context_size: Context window size
+        role: Optional role filter - "user" for user messages only, "assistant" for assistant only, None for both
 
     Returns:
         Conversation messages
@@ -523,6 +547,10 @@ async def get_conversation(
         messages = messages[-20:]
     elif max_messages:
         messages = messages[-max_messages:]
+
+    # Apply role filter if specified
+    if role:
+        messages = [msg for msg in messages if msg['role'] == role]
 
     return {
         'success': True,
