@@ -2,6 +2,31 @@
 """
 Memory MCP Server - Todo-Based Search
 Searches Claude Code conversation history using TodoWrite tool calls as structured summaries
+
+USAGE INSTRUCTIONS FOR AGENTS:
+
+When to use this server:
+- User mentions something that seems to carry rich context but you have no context for it
+- User references past work, decisions, or conversations
+- User asks you to build on or refine something from before
+- You're starting a new conversation and the user's request suggests prior work exists
+
+This is a PARALLEL STRATEGY to searching workspace files:
+- Workspace files: Current state of code and documentation
+- Memory search: Past decisions, evolution of thinking, what we tried and why
+
+How to use effectively:
+1. Search with multiple keyword variations (don't give up after one search)
+2. Look at multiple relevant conversations (not just the first match)
+3. Pull actual context from chapters to understand decisions made
+4. Speak as continuous memory - you ARE the same agent across all sessions
+5. Don't mechanically list findings - naturally weave past context into current work
+
+Example workflow:
+- User: "Let's refine the outreach strategy"
+- You: Search for "outreach email strategy", "pitch formula", "recognition imagination"
+- Pull context from 2-3 relevant conversations
+- Synthesize: "We built the Recognition→Provocation→Credentials structure because..."
 """
 
 import os
