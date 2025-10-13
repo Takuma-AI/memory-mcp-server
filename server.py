@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Memory MCP Server
-Provides tools for searching and reading Claude Code chat history
+Memory MCP Server - Todo-Based Search
+Searches Claude Code conversation history using TodoWrite tool calls as structured summaries
 """
 
 import os
 import json
 import glob as glob_module
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from mcp.server.fastmcp import FastMCP
-import re
 from datetime import datetime
 
 # Initialize MCP server
@@ -19,37 +18,16 @@ mcp = FastMCP("memory")
 # Path to Claude Code projects
 CLAUDE_PROJECTS_PATH = os.path.expanduser("~/.claude/projects")
 
-class ConversationEntry:
-    def __init__(self, data: dict):
-        self.type = data.get("type", "")
-        self.message = data.get("message")
-        self.timestamp = data.get("timestamp", "")
-        self.summary = data.get("summary", "")
-        self.session_id = data.get("sessionId", "")
+# In-memory conversation cache
+_conversation_cache: Dict[str, Dict[str, Any]] = {}
 
-class SearchResult:
-    def __init__(self, file: str, project: str, session_id: str, timestamp: str, excerpt: str, match_type: str, message_index: int = 0):
-        self.file = file
-        self.project = project
-        self.session_id = session_id
-        self.timestamp = timestamp
-        self.excerpt = excerpt
-        self.match_type = match_type
-        self.message_index = message_index
 
-    def to_dict(self):
-        return {
-            "file": self.file,
-            "project": self.project,
-            "sessionId": self.session_id,
-            "timestamp": self.timestamp,
-            "excerpt": self.excerpt,
-            "matchType": self.match_type,
-            "messageIndex": self.message_index
-        }
+# ============================================================================
+# CORE DATA EXTRACTION
+# ============================================================================
 
-def parse_jsonl_file(file_path: str) -> List[ConversationEntry]:
-    """Parse a JSONL file and return conversation entries"""
+def parse_jsonl_file(file_path: str) -> List[dict]:
+    """Parse a JSONL file and return raw entries"""
     entries = []
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -58,22 +36,20 @@ def parse_jsonl_file(file_path: str) -> List[ConversationEntry]:
                 if line:
                     try:
                         data = json.loads(line)
-                        entries.append(ConversationEntry(data))
+                        entries.append(data)
                     except json.JSONDecodeError:
-                        # Skip invalid JSON lines
                         continue
-    except FileNotFoundError:
-        pass
     except Exception as e:
         print(f"Error reading file {file_path}: {e}")
-    
+
     return entries
+
 
 def extract_text_content(content: Any) -> str:
     """Extract text content from various message content formats"""
     if isinstance(content, str):
         return content
-    
+
     if isinstance(content, list):
         text_parts = []
         for item in content:
@@ -82,112 +58,396 @@ def extract_text_content(content: Any) -> str:
             elif isinstance(item, dict) and item.get("type") == "text":
                 text_parts.append(item.get("text", ""))
         return " ".join(text_parts)
-    
+
     return ""
 
-@mcp.tool()
-async def search_conversations(
-    query: str,
-    project: Optional[str] = None,
-    limit: int = 20,
-    include_assistant: bool = False
-) -> dict:
+
+def extract_conversation_data(jsonl_file: str) -> Dict[str, Any]:
     """
-    Search past Claude Code conversations to find relevant context. USE THIS WHEN user references past work,
-    asks about previous decisions, or you need to check if something was already built/discussed. Returns
-    small excerpts (200 chars) to minimize context - get session IDs, then use get_conversation() for more.
+    Parse JSONL file and extract:
+    - All TodoWrite snapshots with message indices
+    - Final todo state (last snapshot)
+    - Chapter breaks (when todos completed)
+    - Metadata (project, timestamp, first message)
+    """
+    entries = parse_jsonl_file(jsonl_file)
 
-    SEARCH STRATEGY - Use simple keywords, NOT full phrases:
-    ✓ GOOD: "kane" or "basecamp oauth" or "mobile menu"
-    ✗ BAD: "how did we implement the kane money app" (too specific, won't match)
+    todo_snapshots = []
+    message_index = 0
+    session_id = None
+    first_message = None
+    timestamp = None
 
-    Multiple simple keywords work better than long phrases. Search is case-insensitive substring match.
+    for entry in entries:
+        # Extract session ID
+        if 'sessionId' in entry and not session_id:
+            session_id = entry['sessionId']
+
+        # Extract first user message
+        if (entry.get('type') == 'user' and
+            not first_message and
+            entry.get('message')):
+            first_message = extract_text_content(entry['message'].get('content', ''))[:200]
+            if not timestamp:
+                timestamp = entry.get('timestamp')
+
+        # Count messages
+        if entry.get('type') in ['user', 'assistant']:
+            message_index += 1
+
+        # Extract TodoWrite tool calls
+        if entry.get('type') == 'assistant' and entry.get('message'):
+            for content_item in entry['message'].get('content', []):
+                if (isinstance(content_item, dict) and
+                    content_item.get('type') == 'tool_use' and
+                    'TodoWrite' in content_item.get('name', '')):
+
+                    todos = content_item.get('input', {}).get('todos', [])
+                    todo_snapshots.append({
+                        'message_index': message_index,
+                        'timestamp': entry.get('timestamp'),
+                        'todos': todos
+                    })
+
+    # Calculate final state and chapters
+    final_todos = {'completed': [], 'in_progress': [], 'pending': []}
+    chapters = []
+
+    if todo_snapshots:
+        # Get final state from last snapshot
+        for todo in todo_snapshots[-1]['todos']:
+            status = todo.get('status', 'pending')
+            content = todo.get('content', '')
+            if content:
+                final_todos[status].append(content)
+
+        # Calculate chapters from completion points
+        chapters = calculate_chapters(todo_snapshots)
+
+    # Extract project name from file path
+    project = os.path.basename(os.path.dirname(jsonl_file))
+
+    return {
+        'session_id': session_id or 'unknown',
+        'project': project,
+        'first_message': first_message or 'No message',
+        'timestamp': timestamp or '',
+        'todo_snapshots': todo_snapshots,
+        'final_todos': final_todos,
+        'chapters': chapters,
+        'message_count': message_index
+    }
+
+
+def calculate_chapters(todo_snapshots: List[Dict]) -> List[Dict]:
+    """
+    Calculate chapter breaks based on when todos were completed.
+    Each completed todo marks the end of a phase of work.
+    """
+    if not todo_snapshots:
+        return []
+
+    chapters = []
+    completed_todos = set()
+    prev_message_idx = 0
+
+    for snapshot in todo_snapshots:
+        for todo in snapshot['todos']:
+            todo_content = todo.get('content', '')
+            if (todo.get('status') == 'completed' and
+                todo_content and
+                todo_content not in completed_todos):
+
+                # New completion found - create chapter
+                chapters.append({
+                    'title': todo_content,
+                    'message_range': (prev_message_idx, snapshot['message_index']),
+                    'completed_at': snapshot['message_index'],
+                    'message_count': snapshot['message_index'] - prev_message_idx
+                })
+
+                completed_todos.add(todo_content)
+                prev_message_idx = snapshot['message_index']
+
+    return chapters
+
+
+# ============================================================================
+# CACHE MANAGEMENT
+# ============================================================================
+
+def ensure_cache_fresh():
+    """
+    Check file mtimes and re-parse only changed conversations.
+    First run: ~5s to parse all files
+    Subsequent: ~60ms (stat calls + search)
+    """
+    global _conversation_cache
+
+    # Get all conversation files
+    all_files = glob_module.glob(os.path.join(CLAUDE_PROJECTS_PATH, "*", "*.jsonl"))
+
+    for file_path in all_files:
+        try:
+            current_mtime = os.path.getmtime(file_path)
+
+            # Extract session ID from filename (handle various formats)
+            filename = os.path.basename(file_path)
+            session_id = filename.replace('.jsonl', '')
+
+            # Check if we need to (re)parse this file
+            if (session_id not in _conversation_cache or
+                _conversation_cache[session_id].get('mtime', 0) < current_mtime):
+
+                # Parse conversation
+                data = extract_conversation_data(file_path)
+                data['mtime'] = current_mtime
+                data['file_path'] = file_path
+
+                _conversation_cache[session_id] = data
+
+        except Exception as e:
+            print(f"Error processing {file_path}: {e}")
+            continue
+
+
+# ============================================================================
+# MCP TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def list_conversations(limit: int = 20, project: Optional[str] = None) -> dict:
+    """
+    List recent conversations with todo-based summaries.
+    Default entry point - shows what you've worked on.
 
     Args:
-        query: Simple keywords (e.g., "kane", "basecamp oauth", "mobile menu fix")
-        project: Optional project name to filter (e.g., "-Users-kate-Projects-takuma-os")
-        limit: Maximum results (default: 20, use less for efficiency)
-        include_assistant: Include assistant responses (default: false, keep false for speed)
+        limit: Maximum conversations to return (default: 20)
+        project: Optional project filter (e.g., "-Users-kate-Projects-takuma-os")
 
     Returns:
-        Search results with excerpts and session IDs for follow-up
+        Conversations sorted by recency with todo summaries
     """
+    ensure_cache_fresh()
+
+    conversations = []
+
+    for session_id, data in _conversation_cache.items():
+        # Filter by project if specified
+        if project and project not in data.get('project', ''):
+            continue
+
+        # Create summary from completed todos
+        completed = data['final_todos'].get('completed', [])
+        pending = data['final_todos'].get('pending', [])
+        in_progress = data['final_todos'].get('in_progress', [])
+
+        summary = ', '.join(completed[:3]) if completed else data.get('first_message', 'No todos')
+
+        conversations.append({
+            'sessionId': session_id,
+            'project': data.get('project', ''),
+            'timestamp': data.get('timestamp', ''),
+            'summary': summary,
+            'completed': completed,
+            'inProgress': in_progress,
+            'pending': pending,
+            'messageCount': data.get('message_count', 0),
+            'hasChapters': len(data.get('chapters', [])) > 0
+        })
+
+    # Sort by timestamp (most recent first)
+    conversations.sort(key=lambda x: x['timestamp'] or '', reverse=True)
+
+    return {'conversations': conversations[:limit]}
+
+
+@mcp.tool()
+async def search_conversations(query: str, limit: int = 20, project: Optional[str] = None) -> dict:
+    """
+    Search todo descriptions (not full text) across all conversations.
+
+    USAGE: Search for topics, features, or work areas. The search looks through
+    todo descriptions which are structured summaries of what was worked on.
+
+    Args:
+        query: Search terms (e.g., "search logic", "kane", "basecamp")
+        limit: Maximum results (default: 20)
+        project: Optional project filter
+
+    Returns:
+        Ranked results with matched todos and summaries
+    """
+    ensure_cache_fresh()
+
+    query_terms = query.lower().split()
     results = []
-    
-    # Get project directories
-    if project:
-        project_pattern = os.path.join(CLAUDE_PROJECTS_PATH, project)
-        project_dirs = [project_pattern] if os.path.exists(project_pattern) else []
-    else:
-        project_dirs = [d for d in glob_module.glob(os.path.join(CLAUDE_PROJECTS_PATH, "*")) 
-                       if os.path.isdir(d)]
-    
-    for project_dir in project_dirs:
-        project_name = os.path.basename(project_dir)
-        jsonl_files = glob_module.glob(os.path.join(project_dir, "*.jsonl"))
-        
-        for file in jsonl_files:
-            entries = parse_jsonl_file(file)
-            session_id = ""
-            message_index = 0  # Track message position
 
-            for entry in entries:
-                if entry.session_id:
-                    session_id = entry.session_id
+    for session_id, data in _conversation_cache.items():
+        # Filter by project if specified
+        if project and project not in data.get('project', ''):
+            continue
 
-                # Search in user messages
-                if entry.type == "user" and entry.message:
-                    content = extract_text_content(entry.message.get("content", ""))
-                    if query.lower() in content.lower():
-                        result = SearchResult(
-                            file=os.path.basename(file),
-                            project=project_name,
-                            session_id=session_id,
-                            timestamp=entry.timestamp,
-                            excerpt=content[:200],
-                            match_type="user",
-                            message_index=message_index
-                        )
-                        results.append(result.to_dict())
-                    message_index += 1  # Count user messages
+        score = 0
+        matched_todos = []
 
-                # Search in assistant messages if requested
-                elif entry.type == "assistant" and entry.message:
-                    if include_assistant:
-                        content_list = entry.message.get("content", [])
-                        for item in content_list:
-                            if isinstance(item, dict) and item.get("type") == "text":
-                                text = item.get("text", "")
-                                if query.lower() in text.lower():
-                                    result = SearchResult(
-                                        file=os.path.basename(file),
-                                        project=project_name,
-                                        session_id=session_id,
-                                        timestamp=entry.timestamp,
-                                        excerpt=text[:200],
-                                        match_type="assistant",
-                                        message_index=message_index
-                                    )
-                                    results.append(result.to_dict())
-                    message_index += 1  # Count assistant messages
-                
-                # Search in summaries
-                if entry.type == "summary" and entry.summary:
-                    if query.lower() in entry.summary.lower():
-                        result = SearchResult(
-                            file=os.path.basename(file),
-                            project=project_name,
-                            session_id=session_id,
-                            timestamp="",
-                            excerpt=entry.summary,
-                            match_type="summary"
-                        )
-                        results.append(result.to_dict())
-                
-                if len(results) >= limit:
-                    return {"results": results}
-    
-    return {"results": results}
+        # Search all todos (completed + in_progress + pending)
+        all_todos = (data['final_todos'].get('completed', []) +
+                    data['final_todos'].get('in_progress', []) +
+                    data['final_todos'].get('pending', []))
+
+        for todo in all_todos:
+            todo_lower = todo.lower()
+            matches = sum(1 for term in query_terms if term in todo_lower)
+            if matches > 0:
+                score += matches
+                matched_todos.append(todo)
+
+        if score > 0:
+            completed = data['final_todos'].get('completed', [])
+            summary = ', '.join(completed[:3]) if completed else data.get('first_message', '')[:100]
+
+            results.append({
+                'sessionId': session_id,
+                'score': score,
+                'matchedTodos': matched_todos,
+                'summary': summary,
+                'project': data.get('project', ''),
+                'timestamp': data.get('timestamp', ''),
+                'hasChapters': len(data.get('chapters', [])) > 0
+            })
+
+    # Sort by score (descending), then timestamp (descending)
+    results.sort(key=lambda x: (x['score'], x['timestamp'] or ''), reverse=True)
+
+    return {
+        'results': results[:limit],
+        'totalMatches': len(results)
+    }
+
+
+@mcp.tool()
+async def get_conversation_chapters(session_id: str) -> dict:
+    """
+    Get natural chapter breaks based on completed todos.
+    Each chapter represents a phase of work that was completed.
+
+    Args:
+        session_id: Session ID from list_conversations() or search_conversations()
+
+    Returns:
+        Chapters with message ranges and pending work
+    """
+    ensure_cache_fresh()
+
+    if session_id not in _conversation_cache:
+        return {
+            'error': f'Conversation {session_id} not found',
+            'success': False
+        }
+
+    data = _conversation_cache[session_id]
+
+    return {
+        'success': True,
+        'sessionId': session_id,
+        'chapters': data.get('chapters', []),
+        'pendingWork': [
+            {'title': todo, 'status': 'pending'}
+            for todo in data['final_todos'].get('pending', [])
+        ] + [
+            {'title': todo, 'status': 'in_progress'}
+            for todo in data['final_todos'].get('in_progress', [])
+        ]
+    }
+
+
+@mcp.tool()
+async def get_conversation_context(
+    session_id: str,
+    start: int,
+    end: int,
+    expand: int = 0
+) -> dict:
+    """
+    Get messages from a specific range in a conversation.
+    Use with chapter info to read relevant sections.
+
+    Args:
+        session_id: Session ID
+        start: Start message index (from chapter info)
+        end: End message index
+        expand: Optional - add N messages before/after (default: 0)
+
+    Returns:
+        Messages in the specified range
+    """
+    ensure_cache_fresh()
+
+    if session_id not in _conversation_cache:
+        return {
+            'error': f'Conversation {session_id} not found',
+            'success': False
+        }
+
+    data = _conversation_cache[session_id]
+    file_path = data.get('file_path')
+
+    if not file_path or not os.path.exists(file_path):
+        return {
+            'error': 'Conversation file not found',
+            'success': False
+        }
+
+    # Parse messages from file
+    entries = parse_jsonl_file(file_path)
+    messages = []
+    message_index = 0
+
+    for entry in entries:
+        if entry.get('type') in ['user', 'assistant']:
+            message_index += 1
+
+            if entry.get('type') == 'user' and entry.get('message'):
+                messages.append({
+                    'role': 'user',
+                    'content': extract_text_content(entry['message'].get('content', '')),
+                    'timestamp': entry.get('timestamp', ''),
+                    'index': message_index
+                })
+            elif entry.get('type') == 'assistant' and entry.get('message'):
+                text_parts = []
+                for item in entry['message'].get('content', []):
+                    if isinstance(item, dict) and item.get('type') == 'text':
+                        text_parts.append(item.get('text', ''))
+                messages.append({
+                    'role': 'assistant',
+                    'content': '\n'.join(text_parts),
+                    'timestamp': entry.get('timestamp', ''),
+                    'index': message_index
+                })
+
+    # Apply range with expansion
+    actual_start = max(0, start - expand)
+    actual_end = min(len(messages), end + expand)
+
+    selected_messages = messages[actual_start:actual_end]
+
+    return {
+        'success': True,
+        'sessionId': session_id,
+        'messageRange': (actual_start, actual_end),
+        'requestedRange': (start, end),
+        'messages': selected_messages,
+        'totalMessages': len(messages),
+        'canExpandBefore': actual_start > 0,
+        'canExpandAfter': actual_end < len(messages)
+    }
+
+
+# ============================================================================
+# LEGACY TOOLS (Keep for backward compatibility)
+# ============================================================================
 
 @mcp.tool()
 async def get_conversation(
@@ -198,158 +458,97 @@ async def get_conversation(
     context_size: int = 10
 ) -> dict:
     """
-    Retrieve conversation by session ID. Can get full conversation, recent messages, or context around a match.
+    Legacy tool - retrieve full conversation.
 
-    WARNING: Full conversations can be large (20-50KB). Use limiting parameters to reduce size.
-
-    USAGE PATTERNS:
-    - get_conversation(session_id, around_message=47, context_size=10) - Get 10 messages before/after message 47 (~2-5KB) **BEST FOR SEARCH RESULTS**
-    - get_conversation(session_id, max_messages=10) - Get last 10 messages only (~2-5KB)
-    - get_conversation(session_id, recent_only=True) - Get last 20 messages (~5-10KB)
-    - get_conversation(session_id) - Full conversation (20-50KB, use sparingly)
+    NOTE: Consider using get_conversation_chapters() and get_conversation_context()
+    for more efficient retrieval.
 
     Args:
-        session_id: Session ID from search_conversations() results
-        around_message: Get messages around this index (from search results messageIndex)
-        context_size: How many messages before/after around_message to include (default: 10)
-        max_messages: Limit to last N messages (default: None = all messages)
-        recent_only: If True, return last 20 messages (default: False)
+        session_id: Session ID
+        max_messages: Limit to last N messages
+        recent_only: Get last 20 messages
+        around_message: Get messages around this index
+        context_size: Context window size
 
     Returns:
-        Conversation with messages (size depends on parameters)
+        Conversation messages
     """
-    # Find the conversation file
-    pattern = os.path.join(CLAUDE_PROJECTS_PATH, "*", f"*{session_id}*.jsonl")
-    files = glob_module.glob(pattern)
-    
-    if not files:
+    ensure_cache_fresh()
+
+    if session_id not in _conversation_cache:
         return {
-            "error": f"Conversation {session_id} not found",
-            "success": False
+            'error': f'Conversation {session_id} not found',
+            'success': False
         }
-    
-    entries = parse_jsonl_file(files[0])
-    
-    # Format conversation
+
+    data = _conversation_cache[session_id]
+    file_path = data.get('file_path')
+
+    if not file_path or not os.path.exists(file_path):
+        return {
+            'error': 'Conversation file not found',
+            'success': False
+        }
+
+    # Parse all messages
+    entries = parse_jsonl_file(file_path)
     messages = []
-    summary = ""
-    
+
     for entry in entries:
-        if entry.type == "summary":
-            summary = entry.summary
-        elif entry.type == "user" and entry.message:
+        if entry.get('type') == 'user' and entry.get('message'):
             messages.append({
-                "role": "user",
-                "content": extract_text_content(entry.message.get("content", "")),
-                "timestamp": entry.timestamp
+                'role': 'user',
+                'content': extract_text_content(entry['message'].get('content', '')),
+                'timestamp': entry.get('timestamp', '')
             })
-        elif entry.type == "assistant" and entry.message:
+        elif entry.get('type') == 'assistant' and entry.get('message'):
             text_parts = []
-            for item in entry.message.get("content", []):
-                if isinstance(item, dict) and item.get("type") == "text":
-                    text_parts.append(item.get("text", ""))
+            for item in entry['message'].get('content', []):
+                if isinstance(item, dict) and item.get('type') == 'text':
+                    text_parts.append(item.get('text', ''))
             messages.append({
-                "role": "assistant",
-                "content": "\n".join(text_parts),
-                "timestamp": entry.timestamp
+                'role': 'assistant',
+                'content': '\n'.join(text_parts),
+                'timestamp': entry.get('timestamp', '')
             })
 
-    # Apply message limiting if requested
     total_messages = len(messages)
 
+    # Apply filtering
     if around_message is not None:
-        # Get messages around a specific index (most useful for search results)
         start_idx = max(0, around_message - context_size)
         end_idx = min(total_messages, around_message + context_size + 1)
         messages = messages[start_idx:end_idx]
     elif recent_only:
-        messages = messages[-20:]  # Last 20 messages
+        messages = messages[-20:]
     elif max_messages:
-        messages = messages[-max_messages:]  # Last N messages
+        messages = messages[-max_messages:]
 
     return {
-        "success": True,
-        "sessionId": session_id,
-        "summary": summary,
-        "file": os.path.basename(files[0]),
-        "project": os.path.basename(os.path.dirname(files[0])),
-        "totalMessages": total_messages,
-        "messageCount": len(messages),
-        "messages": messages,
-        "truncated": len(messages) < total_messages
+        'success': True,
+        'sessionId': session_id,
+        'project': data.get('project', ''),
+        'totalMessages': total_messages,
+        'messageCount': len(messages),
+        'messages': messages,
+        'truncated': len(messages) < total_messages
     }
 
-@mcp.tool()
-async def list_recent(limit: int = 10) -> dict:
-    """
-    List most recent conversations with summaries. Use this when user asks "what did we work on recently?"
-    or when you need to see recent context without a specific search query. Lightweight - returns summaries
-    and first message only, not full conversations.
-
-    Args:
-        limit: Number of conversations (default: 10, keep low for efficiency)
-
-    Returns:
-        Recent conversations with summaries, session IDs, and first message preview
-    """
-    all_files = glob_module.glob(os.path.join(CLAUDE_PROJECTS_PATH, "*", "*.jsonl"))
-    
-    # Get file stats and sort by modification time
-    file_stats = []
-    for file in all_files:
-        try:
-            stat = os.stat(file)
-            file_stats.append({
-                "file": file,
-                "mtime": stat.st_mtime
-            })
-        except OSError:
-            continue
-    
-    file_stats.sort(key=lambda x: x["mtime"], reverse=True)
-    
-    recent = []
-    for file_info in file_stats[:limit]:
-        file = file_info["file"]
-        entries = parse_jsonl_file(file)
-        
-        summary = ""
-        session_id = ""
-        first_user_message = ""
-        
-        for entry in entries:
-            if entry.type == "summary":
-                summary = entry.summary
-            if entry.session_id and not session_id:
-                session_id = entry.session_id
-            if entry.type == "user" and not first_user_message and entry.message:
-                first_user_message = extract_text_content(entry.message.get("content", ""))[:200]
-        
-        recent.append({
-            "file": os.path.basename(file),
-            "project": os.path.basename(os.path.dirname(file)),
-            "sessionId": session_id,
-            "summary": summary,
-            "firstMessage": first_user_message,
-            "lastModified": datetime.fromtimestamp(file_info["mtime"]).isoformat()
-        })
-    
-    return {"conversations": recent}
 
 @mcp.tool()
 async def list_projects() -> dict:
     """
-    List all Claude Code projects to help filter searches. Use when you want to narrow search_conversations()
-    to a specific project but don't know the exact project name. Minimal context usage.
+    List all Claude Code projects.
 
     Returns:
-        List of project names (use these in search_conversations project filter)
+        List of project names
     """
-    project_dirs = [d for d in glob_module.glob(os.path.join(CLAUDE_PROJECTS_PATH, "*")) 
+    project_dirs = [d for d in glob_module.glob(os.path.join(CLAUDE_PROJECTS_PATH, "*"))
                    if os.path.isdir(d)]
     projects = [os.path.basename(d) for d in project_dirs]
-    
-    return {"projects": projects}
+
+    return {'projects': projects}
+
 
 if __name__ == "__main__":
     mcp.run()
