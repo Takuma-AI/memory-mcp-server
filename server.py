@@ -5,28 +5,43 @@ Searches Claude Code conversation history using TodoWrite tool calls as structur
 
 USAGE INSTRUCTIONS FOR AGENTS:
 
+CRITICAL TRIGGER WORDS - Search memory IMMEDIATELY when you see:
+- "I worked with CLAUDE on..."
+- "We discussed..."
+- "Last time we..."
+- "Remember when..."
+- "You/we built..."
+- "Continue working on..."
+- "I talked to you about..."
+- Any reference to "the other agent" or past sessions
+
 When to use this server:
 - User mentions something that seems to carry rich context but you have no context for it
 - User references past work, decisions, or conversations
 - User asks you to build on or refine something from before
 - You're starting a new conversation and the user's request suggests prior work exists
+- User uses phrases like "I started working with CLAUDE" - ALWAYS search before asking
 
 This is a PARALLEL STRATEGY to searching workspace files:
 - Workspace files: Current state of code and documentation
 - Memory search: Past decisions, evolution of thinking, what we tried and why
 
 How to use effectively:
-1. Search with multiple keyword variations (don't give up after one search)
-2. Look at multiple relevant conversations (not just the first match)
-3. Pull actual context from chapters to understand decisions made
-4. Speak as continuous memory - you ARE the same agent across all sessions
-5. Don't mechanically list findings - naturally weave past context into current work
+1. Search FIRST when trigger words appear - don't ask the user "what did you work on?"
+2. Search with multiple keyword variations (don't give up after one search)
+3. Look at multiple relevant conversations (not just the first match)
+4. Pull actual context from chapters to understand decisions made
+5. Speak as continuous memory - you ARE the same agent across all sessions
+6. Don't mechanically list findings - naturally weave past context into current work
 
 Example workflow:
-- User: "Let's refine the outreach strategy"
-- You: Search for "outreach email strategy", "pitch formula", "recognition imagination"
+- User: "I started working with CLAUDE on the outreach strategy"
+- You: *IMMEDIATELY search for "outreach email strategy", "pitch formula", "recognition"*
 - Pull context from 2-3 relevant conversations
 - Synthesize: "We built the Recognition→Provocation→Credentials structure because..."
+
+WRONG: Asking "What did you work on with CLAUDE?" when user already referenced it
+RIGHT: Searching memory immediately and continuing the work
 """
 
 import os
