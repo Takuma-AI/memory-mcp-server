@@ -26,22 +26,34 @@ This is a PARALLEL STRATEGY to searching workspace files:
 - Workspace files: Current state of code and documentation
 - Memory search: Past decisions, evolution of thinking, what we tried and why
 
-How to use effectively:
+How to use effectively (PROGRESSIVE DEPTH):
 1. Search FIRST when trigger words appear - don't ask the user "what did you work on?"
-2. Search with multiple keyword variations (don't give up after one search)
-3. Look at multiple relevant conversations (not just the first match)
-4. Pull actual context from chapters to understand decisions made
+2. ASSESS from search results - Look at matched todos and summaries to gauge relevance
+3. Pull specific chapters ONLY if needed - Don't bulk load entire conversations
+4. Start shallow, go deeper progressively - Can always fetch more context later
 5. Speak as continuous memory - you ARE the same agent across all sessions
 6. Don't mechanically list findings - naturally weave past context into current work
 
+ANTI-PATTERN: Bulk loading conversations into context
+RIGHT PATTERN: Search → Assess → Selectively pull what's needed → Expand if necessary
+
 Example workflow:
 - User: "I started working with CLAUDE on the outreach strategy"
-- You: *IMMEDIATELY search for "outreach email strategy", "pitch formula", "recognition"*
-- Pull context from 2-3 relevant conversations
-- Synthesize: "We built the Recognition→Provocation→Credentials structure because..."
+- You: *Search for "outreach email strategy", "pitch formula", "recognition"*
+- Assess: "Found 2 conversations with 'pitch formula' and 'recognition imagination'"
+- Decision: "This looks relevant. Let me pull the chapter about the formula structure"
+- If still need more: "Let me get the specific conversation where we tested variations"
 
-WRONG: Asking "What did you work on with CLAUDE?" when user already referenced it
-RIGHT: Searching memory immediately and continuing the work
+WRONG APPROACH:
+- Searching and immediately pulling full conversations (wastes tokens)
+- Loading everything upfront (context bloat)
+- Asking "What did you work on with CLAUDE?" when user already referenced it
+
+RIGHT APPROACH:
+- Search to map the landscape (what exists?)
+- Assess relevance from search results (do I need this?)
+- Pull targeted chapters/messages (just what's needed now)
+- Expand progressively if gaps remain (fetch more later)
 """
 
 import os
