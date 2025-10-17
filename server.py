@@ -120,28 +120,28 @@ def extract_conversation_data(jsonl_file: str) -> Dict[str, Any]:
     - All TodoWrite snapshots with message indices
     - Final todo state (last snapshot)
     - Chapter breaks (when todos completed)
-    - Metadata (project, timestamp, first message)
+    - Metadata (project, timestamp, user message arc)
     """
     entries = parse_jsonl_file(jsonl_file)
 
     todo_snapshots = []
     message_index = 0
     session_id = None
-    first_message = None
     timestamp = None
+    user_messages = []  # Collect all user messages for summary arc
 
     for entry in entries:
         # Extract session ID
         if 'sessionId' in entry and not session_id:
             session_id = entry['sessionId']
 
-        # Extract first user message
-        if (entry.get('type') == 'user' and
-            not first_message and
-            entry.get('message')):
-            first_message = extract_text_content(entry['message'].get('content', ''))[:200]
-            if not timestamp:
-                timestamp = entry.get('timestamp')
+        # Collect user messages for summary arc
+        if entry.get('type') == 'user' and entry.get('message'):
+            msg_content = extract_text_content(entry['message'].get('content', ''))
+            if msg_content:
+                user_messages.append(msg_content[:200])  # Truncate long messages
+                if not timestamp:
+                    timestamp = entry.get('timestamp')
 
         # Count messages
         if entry.get('type') in ['user', 'assistant']:
@@ -176,18 +176,38 @@ def extract_conversation_data(jsonl_file: str) -> Dict[str, Any]:
         # Calculate chapters from completion points
         chapters = calculate_chapters(todo_snapshots)
 
+    # Build user message arc for conversations without todos
+    # First 2 + Last 2 gives opening and closing context
+    user_message_arc = []
+    user_message_count = len(user_messages)
+
+    if user_message_count > 0:
+        # First two
+        user_message_arc.append(user_messages[0])
+        if user_message_count > 1:
+            user_message_arc.append(user_messages[1])
+
+        # Last two (if not already included)
+        if user_message_count > 3:
+            user_message_arc.append(user_messages[-2])
+            user_message_arc.append(user_messages[-1])
+        elif user_message_count == 3:
+            user_message_arc.append(user_messages[-1])
+
     # Extract project name from file path
     project = os.path.basename(os.path.dirname(jsonl_file))
 
     return {
         'session_id': session_id or 'unknown',
         'project': project,
-        'first_message': first_message or 'No message',
+        'first_message': user_messages[0] if user_messages else 'No message',
+        'user_message_arc': user_message_arc,  # First 2 + Last 2 user messages
+        'user_message_count': user_message_count,  # Total user turns
         'timestamp': timestamp or '',
         'todo_snapshots': todo_snapshots,
         'final_todos': final_todos,
         'chapters': chapters,
-        'message_count': message_index
+        'message_count': message_index  # Total messages (user + assistant)
     }
 
 
@@ -296,7 +316,24 @@ async def list_conversations(limit: int = 20, project: Optional[str] = None) -> 
         pending = data['final_todos'].get('pending', [])
         in_progress = data['final_todos'].get('in_progress', [])
 
-        summary = ', '.join(completed[:3]) if completed else data.get('first_message', 'No todos')
+        # Use todo summary if available, otherwise use user message arc
+        if completed:
+            summary = ', '.join(completed[:3])
+        else:
+            # Build arc from user messages: first 2, last 2
+            arc = data.get('user_message_arc', [])
+            user_turn_count = data.get('user_message_count', 0)
+
+            if len(arc) == 1:
+                summary = f"[1 turn] {arc[0]}"
+            elif len(arc) == 2:
+                summary = f"[{user_turn_count} turns] {arc[0]} → {arc[1]}"
+            elif len(arc) == 3:
+                summary = f"[{user_turn_count} turns] {arc[0]} → {arc[1]} ... {arc[2]}"
+            elif len(arc) >= 4:
+                summary = f"[{user_turn_count} turns] {arc[0]} → {arc[1]} ... {arc[-2]} → {arc[-1]}"
+            else:
+                summary = data.get('first_message', 'No todos')
 
         conversations.append({
             'sessionId': session_id,
@@ -307,6 +344,7 @@ async def list_conversations(limit: int = 20, project: Optional[str] = None) -> 
             'inProgress': in_progress,
             'pending': pending,
             'messageCount': data.get('message_count', 0),
+            'userMessageCount': data.get('user_message_count', 0),
             'hasChapters': len(data.get('chapters', [])) > 0
         })
 
@@ -346,6 +384,7 @@ async def search_conversations(query: str, limit: int = 20, project: Optional[st
 
         score = 0
         matched_todos = []
+        matched_user_messages = []
 
         # Search all todos (completed + in_progress + pending)
         all_todos = (data['final_todos'].get('completed', []) +
@@ -359,17 +398,41 @@ async def search_conversations(query: str, limit: int = 20, project: Optional[st
                 score += matches
                 matched_todos.append(todo)
 
+        # If no todos, search through user message arc
+        if not all_todos:
+            user_arc = data.get('user_message_arc', [])
+            for msg in user_arc:
+                msg_lower = msg.lower()
+                matches = sum(1 for term in query_terms if term in msg_lower)
+                if matches > 0:
+                    score += matches
+                    matched_user_messages.append(msg)
+
         if score > 0:
             completed = data['final_todos'].get('completed', [])
-            summary = ', '.join(completed[:3]) if completed else data.get('first_message', '')[:100]
+
+            # Build summary from todos or user message arc
+            if completed:
+                summary = ', '.join(completed[:3])
+            else:
+                arc = data.get('user_message_arc', [])
+                user_turn_count = data.get('user_message_count', 0)
+                if len(arc) >= 4:
+                    summary = f"[{user_turn_count} turns] {arc[0][:80]} → ... → {arc[-1][:80]}"
+                elif len(arc) > 0:
+                    summary = f"[{user_turn_count} turns] {arc[0][:100]}"
+                else:
+                    summary = data.get('first_message', '')[:100]
 
             results.append({
                 'sessionId': session_id,
                 'score': score,
                 'matchedTodos': matched_todos,
+                'matchedUserMessages': matched_user_messages,
                 'summary': summary,
                 'project': data.get('project', ''),
                 'timestamp': data.get('timestamp', ''),
+                'userMessageCount': data.get('user_message_count', 0),
                 'hasChapters': len(data.get('chapters', [])) > 0
             })
 
@@ -511,6 +574,116 @@ async def get_conversation_context(
         'totalMessages': len(messages),
         'canExpandBefore': actual_start > 0,
         'canExpandAfter': actual_end < len(messages)
+    }
+
+
+@mcp.tool()
+async def get_conversation_by_turns(
+    session_id: str,
+    user_turn: int,
+    context_turns: int = 2,
+    include_assistant: bool = True
+) -> dict:
+    """
+    Navigate conversations by user turn number (page turning).
+
+    USAGE: Perfect for conversations without todos. See turn count in list/search results,
+    then jump to specific points: "get context around turn 12".
+
+    This is especially useful for:
+    - No-todo conversations where you can't navigate by chapters
+    - Finding specific exchanges when you know approximately when they occurred
+    - Progressive exploration: start → middle → end
+
+    Args:
+        session_id: Session ID
+        user_turn: The user turn number to center on (1-indexed)
+        context_turns: How many user turns before/after to include (default: 2)
+        include_assistant: Whether to include assistant responses (default: True)
+
+    Returns:
+        Messages around the specified user turn with navigation hints
+
+    Example:
+        - Conversation has 15 user turns
+        - Request: get_conversation_by_turns(session_id, user_turn=8, context_turns=2)
+        - Returns: User turns 6-10 with their assistant responses
+    """
+    ensure_cache_fresh()
+
+    if session_id not in _conversation_cache:
+        return {
+            'error': f'Conversation {session_id} not found',
+            'success': False
+        }
+
+    data = _conversation_cache[session_id]
+    file_path = data.get('file_path')
+
+    if not file_path or not os.path.exists(file_path):
+        return {
+            'error': 'Conversation file not found',
+            'success': False
+        }
+
+    # Parse and track user turns
+    entries = parse_jsonl_file(file_path)
+    messages_with_turns = []
+    user_turn_count = 0
+    message_index = 0
+
+    for entry in entries:
+        if entry.get('type') in ['user', 'assistant']:
+            message_index += 1
+
+            if entry.get('type') == 'user' and entry.get('message'):
+                user_turn_count += 1
+                messages_with_turns.append({
+                    'role': 'user',
+                    'content': extract_text_content(entry['message'].get('content', '')),
+                    'timestamp': entry.get('timestamp', ''),
+                    'userTurn': user_turn_count,
+                    'messageIndex': message_index
+                })
+            elif entry.get('type') == 'assistant' and entry.get('message'):
+                text_parts = []
+                for item in entry['message'].get('content', []):
+                    if isinstance(item, dict) and item.get('type') == 'text':
+                        text_parts.append(item.get('text', ''))
+                messages_with_turns.append({
+                    'role': 'assistant',
+                    'content': '\n'.join(text_parts),
+                    'timestamp': entry.get('timestamp', ''),
+                    'userTurn': user_turn_count,  # Associate with current user turn
+                    'messageIndex': message_index
+                })
+
+    # Find the target range of user turns
+    target_start_turn = max(1, user_turn - context_turns)
+    target_end_turn = min(user_turn_count, user_turn + context_turns)
+
+    # Filter messages by turn range
+    selected_messages = []
+    for msg in messages_with_turns:
+        msg_turn = msg.get('userTurn', 0)
+        if target_start_turn <= msg_turn <= target_end_turn:
+            if include_assistant or msg['role'] == 'user':
+                selected_messages.append(msg)
+
+    return {
+        'success': True,
+        'sessionId': session_id,
+        'requestedTurn': user_turn,
+        'turnRange': (target_start_turn, target_end_turn),
+        'totalUserTurns': user_turn_count,
+        'messages': selected_messages,
+        'canPageBackward': target_start_turn > 1,
+        'canPageForward': target_end_turn < user_turn_count,
+        'navigationHint': (
+            f"Showing turns {target_start_turn}-{target_end_turn} of {user_turn_count}. "
+            f"{'Can page backward. ' if target_start_turn > 1 else ''}"
+            f"{'Can page forward.' if target_end_turn < user_turn_count else ''}"
+        )
     }
 
 
