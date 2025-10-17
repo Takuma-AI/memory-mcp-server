@@ -177,21 +177,15 @@ def extract_conversation_data(jsonl_file: str) -> Dict[str, Any]:
         chapters = calculate_chapters(todo_snapshots)
 
     # Build user message arc for conversations without todos
-    # First 2 + Last 2 gives opening and closing context
+    # First + Last gives opening and closing context
     user_message_arc = []
     user_message_count = len(user_messages)
 
     if user_message_count > 0:
-        # First two
+        # First message
         user_message_arc.append(user_messages[0])
+        # Last message (if different from first)
         if user_message_count > 1:
-            user_message_arc.append(user_messages[1])
-
-        # Last two (if not already included)
-        if user_message_count > 3:
-            user_message_arc.append(user_messages[-2])
-            user_message_arc.append(user_messages[-1])
-        elif user_message_count == 3:
             user_message_arc.append(user_messages[-1])
 
     # Extract project name from file path
@@ -201,7 +195,7 @@ def extract_conversation_data(jsonl_file: str) -> Dict[str, Any]:
         'session_id': session_id or 'unknown',
         'project': project,
         'first_message': user_messages[0] if user_messages else 'No message',
-        'user_message_arc': user_message_arc,  # First 2 + Last 2 user messages
+        'user_message_arc': user_message_arc,  # First + Last user messages
         'user_message_count': user_message_count,  # Total user turns
         'timestamp': timestamp or '',
         'todo_snapshots': todo_snapshots,
@@ -320,18 +314,14 @@ async def list_conversations(limit: int = 20, project: Optional[str] = None) -> 
         if completed:
             summary = ', '.join(completed[:3])
         else:
-            # Build arc from user messages: first 2, last 2
+            # Build arc from user messages: first + last
             arc = data.get('user_message_arc', [])
             user_turn_count = data.get('user_message_count', 0)
 
             if len(arc) == 1:
                 summary = f"[1 turn] {arc[0]}"
             elif len(arc) == 2:
-                summary = f"[{user_turn_count} turns] {arc[0]} → {arc[1]}"
-            elif len(arc) == 3:
-                summary = f"[{user_turn_count} turns] {arc[0]} → {arc[1]} ... {arc[2]}"
-            elif len(arc) >= 4:
-                summary = f"[{user_turn_count} turns] {arc[0]} → {arc[1]} ... {arc[-2]} → {arc[-1]}"
+                summary = f"[{user_turn_count} turns] {arc[0]} ... {arc[1]}"
             else:
                 summary = data.get('first_message', 'No todos')
 
@@ -417,9 +407,9 @@ async def search_conversations(query: str, limit: int = 20, project: Optional[st
             else:
                 arc = data.get('user_message_arc', [])
                 user_turn_count = data.get('user_message_count', 0)
-                if len(arc) >= 4:
-                    summary = f"[{user_turn_count} turns] {arc[0][:80]} → ... → {arc[-1][:80]}"
-                elif len(arc) > 0:
+                if len(arc) == 2:
+                    summary = f"[{user_turn_count} turns] {arc[0][:80]} ... {arc[1][:80]}"
+                elif len(arc) == 1:
                     summary = f"[{user_turn_count} turns] {arc[0][:100]}"
                 else:
                     summary = data.get('first_message', '')[:100]
